@@ -57,7 +57,7 @@ Additional configuration options required when connecting to the Cloud version a
 
 ## Usage
 
-Public functions functions in the `clojure.chroma-client/api`
+Public functions in the `clojure.chroma-client/api`
 namespace are asynchronous and immediately return a promise or future,
 which must be dereferenced to obtain the results.
 
@@ -118,11 +118,11 @@ functions that manipulate embeddings.
 ```
 
 By default, `collections` or `get` will return up to 100 items at a
-time (or goverend by the `:limit` option. Pass the return value (prior
+time (or governed by the `:limit` option. Pass the return value (prior
 to dereferencing) to the `page-seq` function to return a lazy sequence
 of all results, which fetches additional items on demand.
 
-``` clojure
+```clojure
 ;; Get first page
 (def result (api/get my-coll :limit 50))
 
