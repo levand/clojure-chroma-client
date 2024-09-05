@@ -20,9 +20,9 @@ and return sequences.
 
 Add the git dependency to your `deps.edn` file:
 
-```
+```clojure
 {:deps {:git/url "https://github.com/levand/clojure-chroma-client.git"
-                  :sha "<current-sha>"}}
+        :sha "<current-sha>"}}
 ```
 
 This library is not yet packaged or distributed via Maven. To use from
@@ -122,8 +122,7 @@ time (or goverend by the `:limit` option. Pass the return value (prior
 to dereferencing) to the `page-seq` function to return a lazy sequence
 of all results, which fetches additional items on demand.
 
-```
-
+``` clojure
 ;; Get first page
 (def result (api/get my-coll :limit 50))
 
