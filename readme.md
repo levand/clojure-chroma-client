@@ -21,8 +21,8 @@ and return sequences.
 Add the git dependency to your `deps.edn` file:
 
 ```clojure
-{:deps {:git/url "https://github.com/levand/clojure-chroma-client.git"
-        :sha "<current-sha>"}}
+{:deps {io.github.levand/clojure-chroma-client {:git/url "https://github.com/levand/clojure-chroma-client.git"
+                                                :sha "<current-sha>"}}}
 ```
 
 This library is not yet packaged or distributed via Maven. To use from
