@@ -1,0 +1,6 @@
+{:lib      io.github.hive-agi/clojure-chroma-client
+ :minor    1
+ :license  {:name "Apache-2.0" :url "https://www.apache.org/licenses/LICENSE-2.0"}
+ :scm-url  "https://github.com/BuddhiLW/clojure-chroma-client"
+ :src-dirs ["src"]
+ :publish  :clojars}

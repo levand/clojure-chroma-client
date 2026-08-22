@@ -1,8 +1,13 @@
 {:paths ["src"]
- :deps {org.clojure/clojure {:mvn/version "1.11.3"}
+ :deps {org.clojure/clojure {:mvn/version "1.12.0"}
         http-kit/http-kit {:mvn/version "2.8.0"}
         clj-json/clj-json {:mvn/version "0.5.3"}}
- :aliases {:test {:extra-paths ["test"]
+ :aliases {
+  ;; :build — tools.build entrypoint (clojure -T:build <task>). Canonical hive
+  ;; build: jar / jar-aot / install / bump / verify-license / deploy.
+  :build {:deps {io.github.hive-agi/hive-build {:mvn/version "0.1.0"}}
+          :ns-default hive-build.api}
+:test {:extra-paths ["test"]
                   :jvm-opts []
-                  :extra-deps { ch.qos.logback/logback-classic {:mvn/version "1.4.9"}}}}}
+                  :extra-deps { ch.qos.logback/logback-classic {:mvn/version "1.5.18"}}}}}
 

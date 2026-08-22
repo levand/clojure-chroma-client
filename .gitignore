@@ -1,3 +1,6 @@
 .cpcache
 *.el
 *.env
+.clj-kondo/.cache/
+.clj-kondo/imports/
+.lsp/.cache/

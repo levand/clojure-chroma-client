@@ -1,13 +1,14 @@
 (ns clojure-chroma-client.api
   "Chroma API. All API functions return a derefable promise. If the
-  value of the promise is an exception, it will be thrown upon deref."
+  value of the promise is an exception, it will be thrown upon deref.
+  
+  Supports both v1 and v2 APIs. Set *api-version* to \"v1\" or \"v2\" (default)."
   (:require [clojure-chroma-client.config :as config]
             [org.httpkit.client :as http]
             [clj-json.core :as json]
             [clojure.set :as set]
             [clojure.string :as str])
   (:refer-clojure :exclude [update count get]))
-
 
 (defrecord WrappingPromise [delegate f]
   clojure.lang.IDeref
@@ -27,11 +28,27 @@
 (prefer-method print-method clojure.lang.IDeref clojure.lang.IRecord)
 
 (alter-var-root #'json/*coercions* merge
-  {(class (make-array Double/TYPE 1)) seq
-   (class (make-array Double 1)) seq})
+                {(class (make-array Double/TYPE 1)) seq
+                 (class (make-array Double 1)) seq})
 
-(defn- url [path]
-  (str config/*protocol* "://" config/*host* ":" config/*port* "/api/v1/" path))
+(defn- base-url
+  "Build base URL for API requests."
+  []
+  (str config/*protocol* "://" config/*host* ":" config/*port*))
+
+(defn- url
+  "Build full URL for API path.
+   v1: /api/v1/{path}?tenant=X&database=Y
+   v2: /api/v2/tenants/{tenant}/databases/{database}/{path}"
+  [path]
+  (if (= "v2" config/*api-version*)
+    (str (base-url) "/api/v2/tenants/" config/*tenant* "/databases/" config/*database* "/" path)
+    (str (base-url) "/api/v1/" path)))
+
+(defn- global-url
+  "Build URL for global endpoints (version, heartbeat, reset) that don't need tenant/database."
+  [path]
+  (str (base-url) "/api/" config/*api-version* "/" path))
 
 (defn- json-body
   [resp]
@@ -50,21 +67,30 @@
     (throw (ex-info "HTTP Error" {:response (clean-response resp)}))
     (not (<= 200 (:status resp) 299))
     (throw (ex-info "Unsuccessful HTTP status code" {:resp (clean-response resp)
-                                                     :code (:status resp)}))))
+                                                     :code (:status resp)
+                                                     :body (:body resp)}))))
 
 (defn- request
-  [method path params body resp-fn]
-  (let [params (assoc params
-                 :tenant config/*tenant*
-                 :database config/*database*)
-        headers (if config/*api-key* {"x-chroma-token" config/*api-key*} {})
+  "Make an HTTP request to the Chroma API.
+   For v1: adds tenant/database as query params.
+   For v2: tenant/database are already in the URL path."
+  [method path params body resp-fn & {:keys [global?] :or {global? false}}]
+  (let [;; For v1, add tenant/database to query params; for v2 they're in the path
+        params (if (and (= "v1" config/*api-version*) (not global?))
+                 (assoc params
+                        :tenant config/*tenant*
+                        :database config/*database*)
+                 params)
+        headers (cond-> {"Content-Type" "application/json"}
+                  config/*api-key* (assoc "x-chroma-token" config/*api-key*))
+        target-url (if global? (global-url path) (url path))
         ret (http/request
-              {:timeout config/*timeout*
-               :headers headers
-               :method method
-               :url (url path)
-               :query-params params
-               :body (when body (json/generate-string body))})]
+             {:timeout config/*timeout*
+              :headers headers
+              :method method
+              :url target-url
+              :query-params (when (seq params) params)
+              :body (when body (json/generate-string body))})]
     (->WrappingPromise ret (fn [resp]
                              (throw-on-error resp)
                              (resp-fn (json/parse-string (:body resp) true))))))
@@ -72,7 +98,7 @@
 (defn version
   "The version of Chroma as reported by the server."
   []
-  (request :get "version" {} nil identity))
+  (request :get "version" {} nil identity :global? true))
 
 (defn reset
   "Reset the entire database. Forbidden unless
@@ -80,12 +106,12 @@
   Cloud."
   []
   (when-not config/*allow-reset* (throw (ex-info "Reset is not enabled, set *allow-reset*." {})))
-  (request :post "reset" {} nil identity))
+  (request :post "reset" {} nil identity :global? true))
 
 (defn heartbeat
   "Check that the Chroma server is active and responding."
   []
-  (request :get "heartbeat" {} nil identity))
+  (request :get "heartbeat" {} nil identity :global? true))
 
 (defn- with-page-metadata
   [records f & args]
@@ -102,10 +128,10 @@
   structure."
   [promise]
   (lazy-seq
-    (let [records @promise]
-      (if-let [next (::next-page (meta records))]
-        (concat records (page-seq (next)))
-        records))))
+   (let [records @promise]
+     (if-let [next (::next-page (meta records))]
+       (concat records (page-seq (next)))
+       records))))
 
 (defn collections
   "List collections.
@@ -122,8 +148,8 @@
   (let [opts {:limit limit
               :offset offset}]
     (request :get "collections" opts nil
-      (fn [result]
-        (with-page-metadata result collections opts)))))
+             (fn [result]
+               (with-page-metadata result collections opts)))))
 
 (defn count-collections
   "Total number of collections"
@@ -141,17 +167,23 @@
    "hnsw:resize_factor" 1.2})
 
 (defn create-collection
-  "Idempotently create a new collection"
+  "Idempotently create a new collection.
+   Note: In v2, metadata cannot be empty - defaults are always applied."
   [name & {:keys [metadata configuration]
-           :or {offset {} configuration {}}
+           :or {configuration {}}
            :as options}]
-  (request :post "collections"
-     {}
-     {:name name
-      :get_or_create true
-      :configuration configuration
-      :metadata (merge collection-metadata-defaults metadata)}
-     identity))
+  (let [final-metadata (merge collection-metadata-defaults metadata)
+        ;; v2 requires non-empty metadata
+        final-metadata (if (empty? final-metadata)
+                         {"created-by" "clojure-chroma-client"}
+                         final-metadata)]
+    (request :post "collections"
+             {}
+             {:name name
+              :get_or_create true
+              :configuration configuration
+              :metadata final-metadata}
+             identity)))
 
 (defn get-collection
   "Find and return collection"
@@ -165,10 +197,10 @@
   (when-not (or name metadata)
     (throw (ex-info "Either name or metadata must be provided" {})))
   (request :put (str "collections/" (:id collection))
-    {}
-    {:new_name name
-     :new_metadata metadata}
-    identity))
+           {}
+           {:new_name name
+            :new_metadata metadata}
+           identity))
 
 (defn delete-collection
   "Delete a collection"
@@ -189,16 +221,16 @@
   nil."
   [s cols]
   (into {}
-    (map (fn [col valseq]
-           (when (some identity valseq)
-             [col valseq]))
-      (map plural cols)
-      (map (fn [col] (map #(clojure.core/get % col) s)) cols))))
+        (map (fn [col valseq]
+               (when (some identity valseq)
+                 [col valseq]))
+             (map plural cols)
+             (map (fn [col] (map #(clojure.core/get % col) s)) cols))))
 
 (defn add
   "Add the given embedding records to a collection."
   [collection embeddings & {:keys [upsert?]
-                            :or {upsert? false }
+                            :or {upsert? false}
                             :as options}]
   (let [url (str "collections/" (:id collection) (if upsert? "/upsert" "/add"))
         records (to-cols embeddings [:id :metadata :document :embedding])]
@@ -238,7 +270,30 @@
   (let [newcols (map singular cols)]
     (apply map (fn [& vals]
                  (zipmap newcols vals))
-      (vals (select-keys m cols)))))
+           (vals (select-keys m cols)))))
+
+(defn- normalize-where
+  "Normalize where clause for v2 API compatibility.
+   v2 API requires $and for multiple top-level conditions.
+   {:type \"note\" :project-id \"foo\"} becomes
+   {:$and [{:type \"note\"} {:project-id \"foo\"}]}"
+  [where]
+  (cond
+    ;; nil or empty - pass through
+    (or (nil? where) (empty? where))
+    where
+    ;; Already has $and or $or - pass through
+    (or (contains? where :$and) (contains? where :$or))
+    where
+    ;; Single key - pass through as-is
+    (= 1 (count where))
+    where
+    ;; v1 API doesn't need normalization
+    (= "v1" config/*api-version*)
+    where
+    ;; Multiple keys in v2 - wrap in $and
+    :else
+    {:$and (mapv (fn [[k v]] {k v}) where)}))
 
 (defn get
   "Get embeddings from a collection.
@@ -271,15 +326,19 @@
               :include include
               :offset offset
               :limit limit}
-        body (select-keys opts [:where :ids :include])
-        body (assoc body :where_document where-document)
+        ;; Normalize where clause for v2 API (requires $and for multiple conditions)
+        normalized-where (normalize-where where)
+        body {:where normalized-where
+              :ids ids
+              :include include
+              :where_document where-document}
         params (select-keys opts [:limit :offset])
         url (str "collections/" (:id collection) "/get")
         fields (conj include :ids)]
     (request :post url params body
-      (fn [result]
-        (let [rows (to-rows result fields)]
-          (with-page-metadata rows get collection opts))))))
+             (fn [result]
+               (let [rows (to-rows result fields)]
+                 (with-page-metadata rows get collection opts))))))
 
 (defn delete
   "Delete embeddings. Options are:
@@ -298,16 +357,17 @@
   (when-not (or where ids where-document)
     (throw (ex-info "Delete requires `ids`, `where` or `where-document`" {})))
   (let [body (-> options
-               (assoc :where_document where-document)
-               (dissoc :where-documet))]
+                 (assoc :where (normalize-where where))
+                 (assoc :where_document where-document)
+                 (dissoc :where-document))]
     (request :post (str "collections/" (:id collection) "/delete")
-      {} body identity)))
+             {} body identity)))
 
 (defn- query-results
   [result cols]
   (apply map (fn [& valseqs]
                (to-rows (zipmap cols valseqs) cols))
-    (vals (select-keys result cols))))
+         (vals (select-keys result cols))))
 
 (defn query-batch
   "Similar to `query`, but takes a seq of query embeddings "
@@ -317,7 +377,7 @@
                                   :as options}]
   (let [body {:query_embeddings query-embeddings
               :n_results num-results
-              :where where
+              :where (normalize-where where)
               :where_document where-document
               :include include}
         url (str "collections/" (:id collection) "/query")
@@ -330,10 +390,70 @@
 
   `filter` and `include` options are the same as in `get`.
 
-  `num-results` controsl the number of matches return."
-  [collection query-embedding & {:keys [filters include num-results]
-                                 :or {filters nil
-                                      num-results 10
+  `num-results` controls the number of matches returned."
+  [collection query-embedding & {:keys [where include num-results]
+                                 :or {num-results 10
                                       include #{:documents :distances :metadatas}}
                                  :as options}]
   (->WrappingPromise (query-batch collection [query-embedding] options) first))
+
+;; ============================================================================
+;; v2 API: Hybrid Search
+;; ============================================================================
+
+(defn search
+  "Perform hybrid search combining vector similarity, metadata filtering,
+  and full-text search (v2 API only).
+
+  NOTE: Chroma Cloud only - not available in self-hosted/local deployments.
+  Local executor returns 'Not implemented for local executor'.
+
+  `searches` is a vector of search specifications, each containing:
+    - :filter {:query-ids [...] :where {...}}  - Filter criteria
+    - :rank {...}                              - Ranking configuration
+    - :select {:keys [...]}                    - Fields to return
+    - :limit {:limit n :offset m}              - Pagination
+    - :group-by {:keys [...] :aggregate {...}} - Grouping
+
+  Example:
+    (search collection
+      [{:filter {:where {:type \"note\"}}
+        :limit {:limit 10}
+        :select {:keys [\"documents\" \"metadatas\"]}}])"
+  [collection searches]
+  (let [;; Transform clojure-style keys to API format
+        transform-search (fn [s]
+                           (cond-> {}
+                             (:filter s)
+                             (assoc :filter
+                                    (cond-> {}
+                                      (get-in s [:filter :query-ids])
+                                      (assoc :query_ids (get-in s [:filter :query-ids]))
+                                      (get-in s [:filter :where])
+                                      (assoc :where_clause (normalize-where (get-in s [:filter :where])))))
+                             (:rank s) (assoc :rank (:rank s))
+                             (:select s) (assoc :select (:select s))
+                             (:limit s) (assoc :limit (:limit s))
+                             (:group-by s) (assoc :group_by (:group-by s))))
+        body {:searches (mapv transform-search searches)}
+        url (str "collections/" (:id collection) "/search")]
+    (request :post url {} body identity)))
+
+;; ============================================================================
+;; v2 API: Collection Fork
+;; ============================================================================
+
+(defn fork-collection
+  "Fork (copy) a collection to a new collection with the given name (v2 API only).
+
+  NOTE: Chroma Cloud only - not available in self-hosted/local deployments.
+  Local executor returns 'Collection forking is unsupported for local chroma'.
+
+  Returns the newly created collection.
+
+  Example:
+    (fork-collection my-collection \"my-collection-backup\")"
+  [collection new-name]
+  (let [url (str "collections/" (:id collection) "/fork")
+        body {:new_name new-name}]
+    (request :post url {} body identity)))
